@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voxprofile"
+version = "0.1.0"
+description = "End-to-end latency profiler and waterfall visualizer for voice AI agent pipelines (Pipecat)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "yanghaohui" }]
+keywords = ["voice", "latency", "pipecat", "waterfall", "profiler", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Debuggers",
+]
+# Core CLI depends only on the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+pipecat = ["pipecat-ai"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+voxprofile = "voxprofile.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yang-1027/voxprofile"
+Issues = "https://github.com/yang-1027/voxprofile/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voxprofile"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

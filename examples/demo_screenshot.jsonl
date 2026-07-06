@@ -1,0 +1,15 @@
+{"turn_id": 1, "event": "user_stopped_speaking", "t": 1751700000.000}
+{"turn_id": 1, "event": "stt_final", "t": 1751700000.140}
+{"turn_id": 1, "event": "llm_first_token", "t": 1751700000.460}
+{"turn_id": 1, "event": "tts_first_byte", "t": 1751700000.555}
+{"turn_id": 1, "event": "playback_started", "t": 1751700000.610}
+{"turn_id": 2, "event": "user_stopped_speaking", "t": 1751700010.000}
+{"turn_id": 2, "event": "stt_final", "t": 1751700010.185}
+{"turn_id": 2, "event": "llm_first_token", "t": 1751700010.620}
+{"turn_id": 2, "event": "tts_first_byte", "t": 1751700010.740}
+{"turn_id": 2, "event": "playback_started", "t": 1751700010.800}
+{"turn_id": 3, "event": "user_stopped_speaking", "t": 1751700020.000}
+{"turn_id": 3, "event": "stt_final", "t": 1751700020.210}
+{"turn_id": 3, "event": "llm_first_token", "t": 1751700021.070}
+{"turn_id": 3, "event": "tts_first_byte", "t": 1751700021.220}
+{"turn_id": 3, "event": "playback_started", "t": 1751700021.290}
