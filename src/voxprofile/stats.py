@@ -80,7 +80,9 @@ def aggregate_tools(turns: Sequence[Turn]) -> list[StageStats]:
         used_tools = False
         for call in turn.calls:
             dur = call.duration
-            if dur is None:
+            if dur is None or dur < 0:
+                # unfinished, or a backwards (result-before-start) pair: not a
+                # trustworthy latency, so it never enters the statistics.
                 continue
             used_tools = True
             turn_total += dur

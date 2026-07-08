@@ -70,12 +70,12 @@ _TOOL_CSS = """
 .tseg { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 4px;
   transition: filter .12s; }
 .tseg:hover { filter: brightness(1.2); }
-.tseg.pending { border: 1px solid #d9a441;
-  background: repeating-linear-gradient(45deg,#d9a441 0 4px,transparent 4px 9px); }
+.tseg.pending { border: 1px solid __AMBER__;
+  background: repeating-linear-gradient(45deg,__AMBER__ 0 4px,transparent 4px 9px); }
 .tms { flex: 0 0 72px; text-align: right; color: #c7cbd8;
   font-variant-numeric: tabular-nums; }
-.tms.pending { color: #e0b64a; }
-"""
+.tms.pending { color: __AMBER__; }
+""".replace("__AMBER__", _TOOL_PENDING)
 
 
 def _esc(s: str) -> str:
@@ -141,13 +141,14 @@ def _tools_html(turn: Turn) -> str:
         offset_ms = (call.start_t - turn.t0) * 1000.0
         left = min(100.0, max(0.0, offset_ms / turn.total * 100.0)) if turn.total > 0 else 0.0
         dur = call.duration
-        if dur is None:
+        if dur is None or dur < 0:
+            note = "no result" if dur is None else "bad timing"
             width = 2.0
             seg = (
                 f'<div class="tseg pending" style="left:{left:.3f}%;width:{width:.3f}%"'
-                f' title="no result"></div>'
+                f' title="{note}"></div>'
             )
-            ms = '<span class="tms pending">no result</span>'
+            ms = f'<span class="tms pending">{note}</span>'
         else:
             width = min(100.0 - left, dur / turn.total * 100.0) if turn.total > 0 else 0.0
             width = max(width, 0.6)

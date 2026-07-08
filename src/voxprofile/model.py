@@ -198,6 +198,24 @@ def load_turns(path: str, warn: Callable[[str], None] = _warn) -> list[Turn]:
     return turns
 
 
+def _make_call(
+    name: str,
+    start_t: float,
+    result_t: float,
+    call_id: Optional[str],
+    path: str,
+    turn_id: object,
+    warn: Callable[[str], None],
+) -> FunctionCall:
+    """Build a finished call, warning (like boundary stages) on a backwards pair."""
+    if result_t < start_t:
+        warn(
+            f"{path}: turn {turn_id} function call '{name}' has "
+            f"out-of-order timestamps (result before start)"
+        )
+    return FunctionCall(name=name, start_t=start_t, result_t=result_t, call_id=call_id)
+
+
 def _pair_calls(
     records: list[tuple[str, float, str, Optional[str]]],
     path: str,
@@ -206,58 +224,64 @@ def _pair_calls(
 ) -> list[FunctionCall]:
     """Pair function_call_start/result records into :class:`FunctionCall`\\ s.
 
-    Pairing prefers ``call_id`` (pipecat ``tool_call_id``); records without an
-    id fall back to FIFO pairing in timestamp order. A start with no matching
-    result becomes an unfinished call (``result_t=None``); a result with no
-    matching start is a malformed orphan and is dropped with a warning.
+    Pairing runs in two passes: first an exact match on ``call_id`` (pipecat
+    ``tool_call_id``), then a FIFO fallback in timestamp order over *everything*
+    still unmatched -- so a hand-written log where only one side carries an id
+    still pairs up. A start with no matching result becomes an unfinished call
+    (``result_t=None``); a result with no matching start is a malformed orphan
+    and is dropped with a warning.
     """
     if not records:
         return []
 
     starts = [(t, name, cid) for kind, t, name, cid in records if kind == "start"]
     results = [(t, name, cid) for kind, t, name, cid in records if kind == "result"]
-
-    # Bucket results that carry an id for exact matching; the rest go FIFO.
-    results_by_id: dict[str, list[tuple[float, str]]] = {}
-    results_no_id: list[tuple[float, str]] = []
-    for t, name, cid in results:
-        if cid is not None:
-            results_by_id.setdefault(cid, []).append((t, name))
-        else:
-            results_no_id.append((t, name))
-    for bucket in results_by_id.values():
-        bucket.sort(key=lambda x: x[0])
-    results_no_id.sort(key=lambda x: x[0])
-
+    start_used = [False] * len(starts)
+    result_used = [False] * len(results)
     calls: list[FunctionCall] = []
-    starts_no_id: list[tuple[float, str]] = []
-    for t, name, cid in starts:
+
+    # Pass 1: exact call_id matching (earliest result wins within an id).
+    results_by_id: dict[str, list[int]] = {}
+    for ri, (t, _name, cid) in enumerate(results):
         if cid is not None:
-            bucket = results_by_id.get(cid)
-            if bucket:
-                rt, rname = bucket.pop(0)
-                calls.append(
-                    FunctionCall(name=name or rname, start_t=t, result_t=rt, call_id=cid)
-                )
-            else:
-                calls.append(FunctionCall(name=name, start_t=t, result_t=None, call_id=cid))
-        else:
-            starts_no_id.append((t, name))
+            results_by_id.setdefault(cid, []).append(ri)
+    for ids in results_by_id.values():
+        ids.sort(key=lambda ri: results[ri][0])
+    for si in sorted(range(len(starts)), key=lambda si: starts[si][0]):
+        t, name, cid = starts[si]
+        if cid is None:
+            continue
+        queue = results_by_id.get(cid)
+        if queue:
+            ri = queue.pop(0)
+            rt, rname, _ = results[ri]
+            start_used[si] = True
+            result_used[ri] = True
+            calls.append(
+                _make_call(name or rname, t, rt, cid, path, turn_id, warn)
+            )
 
-    starts_no_id.sort(key=lambda x: x[0])
-    ri = 0
-    for t, name in starts_no_id:
-        if ri < len(results_no_id):
-            rt, _ = results_no_id[ri]
-            ri += 1
-            calls.append(FunctionCall(name=name, start_t=t, result_t=rt, call_id=None))
-        else:
-            calls.append(FunctionCall(name=name, start_t=t, result_t=None, call_id=None))
-
-    orphans = sum(len(b) for b in results_by_id.values()) + max(
-        0, len(results_no_id) - ri
+    # Pass 2: FIFO over remaining starts/results, regardless of id presence.
+    rem_starts = sorted(
+        (si for si in range(len(starts)) if not start_used[si]),
+        key=lambda si: starts[si][0],
     )
-    if orphans:
+    rem_results = sorted(
+        (ri for ri in range(len(results)) if not result_used[ri]),
+        key=lambda ri: results[ri][0],
+    )
+    matched = 0
+    for i, si in enumerate(rem_starts):
+        t, name, cid = starts[si]
+        if i < len(rem_results):
+            rt, _rname, _rcid = results[rem_results[i]]
+            matched += 1
+            calls.append(_make_call(name, t, rt, cid, path, turn_id, warn))
+        else:
+            calls.append(FunctionCall(name=name, start_t=t, result_t=None, call_id=cid))
+
+    orphans = len(rem_results) - matched
+    if orphans > 0:
         warn(
             f"{path}: turn {turn_id} has {orphans} function_call_result(s) "
             f"without a matching start"

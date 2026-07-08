@@ -7,6 +7,7 @@ with zero function calls behave exactly as before.
 
 import json
 import os
+import re
 
 from voxprofile.html import render_html
 from voxprofile.model import FunctionCall, load_turns
@@ -107,6 +108,75 @@ def test_fifo_pairing_without_call_id(tmp_path):
     got = [(c.name, round(c.duration)) for c in turns[0].calls]
     # earliest start pairs with earliest result, etc.
     assert got == [("f", 300), ("g", 400)]
+
+
+def test_start_id_result_no_id_still_pairs(tmp_path, capsys):
+    calls = [
+        {"turn_id": 1, "event": "function_call_start", "t": 1000.2,
+         "name": "f", "call_id": "c1"},
+        {"turn_id": 1, "event": "function_call_result", "t": 1000.6, "name": "f"},
+    ]
+    p = _write(tmp_path / "e.jsonl", _turn_events(1, 1000.0, calls))
+    turns = load_turns(p)
+    err = capsys.readouterr().err
+    assert len(turns[0].calls) == 1
+    call = turns[0].calls[0]
+    assert call.finished and round(call.duration) == 400
+    assert "without a matching start" not in err
+
+
+def test_result_id_start_no_id_still_pairs(tmp_path):
+    calls = [
+        {"turn_id": 1, "event": "function_call_start", "t": 1000.2, "name": "f"},
+        {"turn_id": 1, "event": "function_call_result", "t": 1000.6,
+         "name": "f", "call_id": "c1"},
+    ]
+    p = _write(tmp_path / "e.jsonl", _turn_events(1, 1000.0, calls))
+    turns = load_turns(p)
+    assert len(turns[0].calls) == 1
+    call = turns[0].calls[0]
+    assert call.finished and round(call.duration) == 400
+
+
+def test_backwards_pair_by_id_warns_excluded_and_marked(tmp_path, capsys):
+    # id matches but the result timestamp precedes the start (clock skew).
+    calls = [
+        {"turn_id": 1, "event": "function_call_start", "t": 1000.5,
+         "name": "skewed", "call_id": "c1"},
+        {"turn_id": 1, "event": "function_call_result", "t": 1000.2,
+         "name": "skewed", "call_id": "c1"},
+    ]
+    p = _write(tmp_path / "e.jsonl", _turn_events(1, 1000.0, calls))
+    turns = load_turns(p)
+    err = capsys.readouterr().err
+    assert "out-of-order" in err
+    call = turns[0].calls[0]
+    assert call.duration < 0  # the raw (negative) value is retained on the model
+    # excluded from stats
+    assert aggregate_tools(turns) == []
+    # rendered as a neutral marker, never a "-Nms" bar
+    out = render_turn(turns[0], 800.0, 1200.0, PLAIN)
+    assert "bad timing" in out
+    assert not re.search(r"-\d+\s*ms", out)
+    # HTML likewise avoids a negative segment
+    doc = render_html(turns, 800.0, "x.jsonl")
+    assert "bad timing" in doc
+    assert not re.search(r"-\d+\s*ms", doc)
+
+
+def test_fifo_backwards_pair_warns_not_orphan(tmp_path, capsys):
+    # a stray earlier result FIFO-pairs with a later start -> negative duration;
+    # this used to slip in silently with no warning at all.
+    calls = [
+        {"turn_id": 1, "event": "function_call_result", "t": 1000.10, "name": "s"},
+        {"turn_id": 1, "event": "function_call_start", "t": 1000.30, "name": "s"},
+    ]
+    p = _write(tmp_path / "e.jsonl", _turn_events(1, 1000.0, calls))
+    turns = load_turns(p)
+    err = capsys.readouterr().err
+    assert "out-of-order" in err
+    assert "without a matching start" not in err  # they did pair (FIFO)
+    assert aggregate_tools(turns) == []  # negative duration excluded from stats
 
 
 def test_orphan_result_is_dropped_not_crash(tmp_path, capsys):

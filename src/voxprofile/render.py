@@ -95,6 +95,20 @@ def _tool_label(name: str) -> str:
     return raw.ljust(LABEL_WIDTH)
 
 
+def _marker_row(
+    label_cell: str, offset_ms: float, scale: float, note: str, pal: Palette
+) -> str:
+    """A tool row with a single position marker instead of a duration bar."""
+    start = min(max(round(offset_ms * scale), 0), max(0, TRACK_WIDTH - 1))
+    track = (
+        pal.dim(_TRACK * start)
+        + pal.fg(_FILLED, _TOOL_COLOR)
+        + pal.dim(_TRACK * max(0, TRACK_WIDTH - start - 1))
+    )
+    ms_cell = "—".rjust(8)
+    return f"{label_cell} {track}  {ms_cell}  " + pal.fg(note, 214)
+
+
 def _tool_row(call: FunctionCall, turn_t0: float, scale: float, pal: Palette) -> str:
     """Render one function call as its own waterfall row (⚙ label + bar + ms)."""
     label_cell = f"  {_tool_label(call.name)}"
@@ -102,15 +116,11 @@ def _tool_row(call: FunctionCall, turn_t0: float, scale: float, pal: Palette) ->
     dur = call.duration
 
     if dur is None:
-        # Unfinished: a single marker at the start offset, flagged on the right.
-        start = min(max(round(offset_ms * scale), 0), max(0, TRACK_WIDTH - 1))
-        track = (
-            pal.dim(_TRACK * start)
-            + pal.fg(_FILLED, _TOOL_COLOR)
-            + pal.dim(_TRACK * max(0, TRACK_WIDTH - start - 1))
-        )
-        ms_cell = "—".rjust(8)
-        return f"{label_cell} {track}  {ms_cell}  " + pal.fg("⚠ (no result)", 214)
+        # Unfinished: start seen, result never arrived.
+        return _marker_row(label_cell, offset_ms, scale, "⚠ (no result)", pal)
+    if dur < 0:
+        # Backwards pair (result before start): don't draw a negative bar.
+        return _marker_row(label_cell, offset_ms, scale, "⚠ bad timing", pal)
 
     track = _draw_track(offset_ms, dur, scale, _TOOL_COLOR, pal)
     ms_cell = _fmt_ms(dur).rjust(8)
