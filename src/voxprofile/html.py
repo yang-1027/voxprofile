@@ -6,7 +6,7 @@ import html
 from typing import Sequence
 
 from .model import STAGE_LABELS, Turn
-from .stats import StageStats, aggregate
+from .stats import StageStats, aggregate, aggregate_tools
 
 _STAGE_COLOR = {
     "STT": "#2bb6c4",
@@ -14,6 +14,8 @@ _STAGE_COLOR = {
     "TTS": "#57b96a",
     "Playback": "#9d7be0",
 }
+_TOOL_COLOR = "#d08770"    # coral, distinct from the four stage hues
+_TOOL_PENDING = "#d9a441"  # amber, for unfinished (no result) calls
 
 _CSS = """
 :root { color-scheme: dark; }
@@ -55,6 +57,25 @@ thead th { color: #8b90a0; font-weight: 500; font-size: 12px; }
 tr.total-row td { font-weight: 600; border-top: 2px solid #313648; }
 h2 { font-size: 15px; margin: 32px 0 4px; }
 """
+
+# Appended to the stylesheet only when at least one turn has function calls, so
+# tool-free exports remain byte-for-byte identical to earlier versions.
+_TOOL_CSS = """
+.tools { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+.tool { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.tname { flex: 0 0 132px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: #d6d3cb; }
+.ttrack { position: relative; flex: 1; height: 15px; background: #10131b;
+  border-radius: 4px; overflow: hidden; }
+.tseg { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 4px;
+  transition: filter .12s; }
+.tseg:hover { filter: brightness(1.2); }
+.tseg.pending { border: 1px solid __AMBER__;
+  background: repeating-linear-gradient(45deg,__AMBER__ 0 4px,transparent 4px 9px); }
+.tms { flex: 0 0 72px; text-align: right; color: #c7cbd8;
+  font-variant-numeric: tabular-nums; }
+.tms.pending { color: __AMBER__; }
+""".replace("__AMBER__", _TOOL_PENDING)
 
 
 def _esc(s: str) -> str:
@@ -106,16 +127,53 @@ def _turn_html(turn: Turn, target_ms: float, global_max: float) -> str:
         "</div>"
         f'<div class="bar">{"".join(segs)}{target_marker}</div>'
         f"{bn_line}"
+        f"{_tools_html(turn)}"
         "</div>"
     )
 
 
-def _legend_html() -> str:
+def _tools_html(turn: Turn) -> str:
+    """Extra rows for function/tool calls; empty string when there are none."""
+    if not turn.calls:
+        return ""
+    rows = []
+    for call in sorted(turn.calls, key=lambda c: c.start_t):
+        offset_ms = (call.start_t - turn.t0) * 1000.0
+        left = min(100.0, max(0.0, offset_ms / turn.total * 100.0)) if turn.total > 0 else 0.0
+        dur = call.duration
+        if dur is None or dur < 0:
+            note = "no result" if dur is None else "bad timing"
+            width = 2.0
+            seg = (
+                f'<div class="tseg pending" style="left:{left:.3f}%;width:{width:.3f}%"'
+                f' title="{note}"></div>'
+            )
+            ms = f'<span class="tms pending">{note}</span>'
+        else:
+            width = min(100.0 - left, dur / turn.total * 100.0) if turn.total > 0 else 0.0
+            width = max(width, 0.6)
+            seg = (
+                f'<div class="tseg" style="left:{left:.3f}%;width:{width:.3f}%;'
+                f'background:{_TOOL_COLOR}"></div>'
+            )
+            ms = f'<span class="tms">{_fmt(dur)}</span>'
+        rows.append(
+            f'<div class="tool"><span class="tname">⚙ {_esc(call.name)}</span>'
+            f'<div class="ttrack">{seg}</div>{ms}</div>'
+        )
+    return f'<div class="tools">{"".join(rows)}</div>'
+
+
+def _legend_html(any_calls: bool = False) -> str:
     items = []
     for label in STAGE_LABELS:
         color = _STAGE_COLOR.get(label, "#888")
         items.append(
             f'<span><span class="dot" style="background:{color}"></span>{_esc(label)}</span>'
+        )
+    if any_calls:
+        items.append(
+            f'<span><span class="dot" style="background:{_TOOL_COLOR}"></span>tool call</span>'
         )
     items.append('<span><span class="dot" style="background:#e6e8ef"></span>target line</span>')
     return f'<div class="legend">{"".join(items)}</div>'
@@ -137,8 +195,25 @@ def _summary_html(rows: Sequence[StageStats]) -> str:
     return f"<table>{head}<tbody>{''.join(body)}</tbody></table>"
 
 
+def _tool_summary_html(rows: Sequence[StageStats]) -> str:
+    head = (
+        "<thead><tr><th>Function</th><th>p50</th><th>p95</th>"
+        "<th>min</th><th>max</th></tr></thead>"
+    )
+    body = []
+    for i, row in enumerate(rows):
+        cls = ' class="total-row"' if i == 0 else ""
+        body.append(
+            f"<tr{cls}><td>{_esc(row.label)}</td>"
+            f"<td>{_fmt(row.p50)}</td><td>{_fmt(row.p95)}</td>"
+            f"<td>{_fmt(row.min)}</td><td>{_fmt(row.max)}</td></tr>"
+        )
+    return f"<table>{head}<tbody>{''.join(body)}</tbody></table>"
+
+
 def render_html(turns: Sequence[Turn], target_ms: float, source: str) -> str:
     """Return a complete, self-contained HTML document as a string."""
+    any_calls = any(t.calls for t in turns)
     if turns:
         global_max = max(max(t.total for t in turns), target_ms)
         turn_blocks = "".join(
@@ -151,16 +226,23 @@ def render_html(turns: Sequence[Turn], target_ms: float, source: str) -> str:
         summary = ""
         n = 0
 
+    css = _CSS + (_TOOL_CSS if any_calls else "")
+    tool_rows = aggregate_tools(turns) if any_calls else []
+    tool_section = (
+        f"<h2>Tools</h2>{_tool_summary_html(tool_rows)}" if tool_rows else ""
+    )
+
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>voxprofile latency waterfall</title>"
-        f"<style>{_CSS}</style></head><body><div class='wrap'>"
+        f"<style>{css}</style></head><body><div class='wrap'>"
         "<h1>voxprofile · latency waterfall</h1>"
         f'<p class="sub">{_esc(source)} — {n} turn(s), target {target_ms:.0f} ms</p>'
-        f"{_legend_html()}"
+        f"{_legend_html(any_calls)}"
         f"{turn_blocks}"
         f"<h2>Summary</h2>{summary}"
+        f"{tool_section}"
         "</div></body></html>\n"
     )

@@ -25,6 +25,17 @@ voxprofile event           Pipecat frame              notes
                            Frame``                     closes the turn
 =========================  =========================  =========================
 
+In addition to the five boundary events above, two *optional* function-call
+events are emitted when the pipeline uses tools:
+
+    * ``FunctionCallInProgressFrame`` -> ``function_call_start`` (carries
+      ``name`` = ``function_name`` and ``call_id`` = ``tool_call_id``)
+    * ``FunctionCallResultFrame`` -> ``function_call_result`` (same fields)
+
+They are additive: they do not open, close, or de-duplicate a turn, and they
+are only recorded while a turn is open. ``voxprofile replay`` pairs them by
+``call_id`` and draws each call as its own waterfall row.
+
 Timestamps use ``time.time()`` at the moment each frame is observed, so every
 event shares one consistent wall-clock (epoch seconds), which is what the
 voxprofile stage math expects.
@@ -71,6 +82,14 @@ _FRAME_EVENT = {
     "LLMTextFrame": "llm_first_token",
     "TTSAudioRawFrame": "tts_first_byte",
     "BotStartedSpeakingFrame": "playback_started",
+}
+
+# Function/tool-call frames are additive: they carry ``function_name`` /
+# ``tool_call_id`` and may occur 0..N times per turn. They never open, close,
+# or de-duplicate a turn, so barge-in and boundary semantics are untouched.
+_FUNC_FRAME_EVENT = {
+    "FunctionCallInProgressFrame": "function_call_start",
+    "FunctionCallResultFrame": "function_call_result",
 }
 
 _START_EVENT = "user_stopped_speaking"
@@ -137,11 +156,17 @@ class VoxprofileObserver(_BaseObserver):
         method contains no Pipecat imports so it can be exercised with
         synthetic frame objects whose class name matches a mapped frame.
         """
-        event = _FRAME_EVENT.get(type(frame).__name__)
-        if event is None:
+        name = type(frame).__name__
+        func_event = _FUNC_FRAME_EVENT.get(name)
+        event = _FRAME_EVENT.get(name)
+        if func_event is None and event is None:
             return
         if t is None:
             t = time.time()
+
+        if func_event is not None:
+            self._emit_function(func_event, frame, t)
+            return
 
         if event == _START_EVENT:
             if self._turn_open and not self._written:
@@ -166,6 +191,29 @@ class VoxprofileObserver(_BaseObserver):
 
         if event == _END_EVENT:
             self._turn_open = False
+
+    def _emit_function(self, event: str, frame, t: float) -> None:
+        """Record a function/tool-call event with its name and call id.
+
+        Ignored outside an open turn (a stray call with nowhere to attach). Does
+        not touch ``self._written`` so it never counts as turn progress for the
+        barge-in logic.
+        """
+        if not self._turn_open:
+            return
+        if self._fh is None:
+            return
+        line = json.dumps(
+            {
+                "turn_id": self._turn_id,
+                "event": event,
+                "t": round(t, 3),
+                "name": getattr(frame, "function_name", None),
+                "call_id": getattr(frame, "tool_call_id", None),
+            }
+        )
+        self._fh.write(line + "\n")
+        self._fh.flush()
 
     # --- Output ----------------------------------------------------------
 

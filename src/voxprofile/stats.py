@@ -58,3 +58,42 @@ def aggregate(turns: Sequence[Turn]) -> list[StageStats]:
         rows.append(_summarize(label, [t.stages[label] for t in turns]))
     rows.append(_summarize("Total", [t.total for t in turns]))
     return rows
+
+
+# Label used for the aggregate "sum of tool time per turn" row.
+TOOL_TOTAL_LABEL = "total/turn"
+
+
+def aggregate_tools(turns: Sequence[Turn]) -> list[StageStats]:
+    """Function-call latency stats, additive to :func:`aggregate`.
+
+    Returns an empty list when no turn has a *finished* function call, so the
+    tool section is only ever shown when there is something to show. Otherwise
+    the first row is ``total/turn`` (per-turn summed tool time over tool-using
+    turns) followed by one row per distinct function name, in first-seen order.
+    Unfinished calls carry no duration and are excluded from the statistics.
+    """
+    per_turn_totals: list[float] = []
+    by_name: dict[str, list[float]] = {}
+    for turn in turns:
+        turn_total = 0.0
+        used_tools = False
+        for call in turn.calls:
+            dur = call.duration
+            if dur is None or dur < 0:
+                # unfinished, or a backwards (result-before-start) pair: not a
+                # trustworthy latency, so it never enters the statistics.
+                continue
+            used_tools = True
+            turn_total += dur
+            by_name.setdefault(call.name, []).append(dur)
+        if used_tools:
+            per_turn_totals.append(turn_total)
+
+    if not per_turn_totals:
+        return []
+
+    rows = [_summarize(TOOL_TOTAL_LABEL, per_turn_totals)]
+    for name, durations in by_name.items():
+        rows.append(_summarize(name, durations))
+    return rows
