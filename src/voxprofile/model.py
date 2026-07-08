@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
-from typing import Callable, Iterable
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Optional
 
 # Stage definition: (label, start_event, end_event).
 # Each stage duration = t[end_event] - t[start_event].
@@ -39,9 +39,42 @@ REQUIRED_EVENTS: list[str] = [
 _TOTAL_START = "user_stopped_speaking"
 _TOTAL_END = "playback_started"
 
+# Optional, additive function/tool-call events. A turn may carry 0..N of these;
+# they are paired (start -> result) and rendered as extra waterfall rows. They
+# never affect the four boundary stages, so turns without them are unchanged.
+FUNC_START_EVENT = "function_call_start"
+FUNC_RESULT_EVENT = "function_call_result"
+_FUNC_EVENTS = {FUNC_START_EVENT, FUNC_RESULT_EVENT}
+
 
 def _warn(msg: str) -> None:
     print(f"voxprofile: {msg}", file=sys.stderr)
+
+
+@dataclass
+class FunctionCall:
+    """A single function/tool invocation inside a turn.
+
+    Timestamps are epoch seconds (the same clock as boundary events), so a call
+    can be placed on the turn timeline via its offset from the turn start. An
+    unfinished call (start seen, no result) keeps ``result_t=None``.
+    """
+
+    name: str
+    start_t: float                      # epoch seconds when the call began
+    result_t: Optional[float] = None    # epoch seconds when the result returned
+    call_id: Optional[str] = None       # pipecat tool_call_id, used for pairing
+
+    @property
+    def duration(self) -> Optional[float]:
+        """Execution latency in ms, or None if the call never returned."""
+        if self.result_t is None:
+            return None
+        return (self.result_t - self.start_t) * 1000.0
+
+    @property
+    def finished(self) -> bool:
+        return self.result_t is not None
 
 
 @dataclass
@@ -52,6 +85,8 @@ class Turn:
     stages: dict[str, float]  # label -> duration in ms
     total: float              # total latency in ms
     source: str = ""          # originating file, for cross-run stats
+    calls: list[FunctionCall] = field(default_factory=list)  # tool calls, if any
+    t0: float = 0.0           # epoch seconds of the turn start (timeline origin)
 
     @property
     def bottleneck(self) -> str:
@@ -84,6 +119,10 @@ def load_turns(path: str, warn: Callable[[str], None] = _warn) -> list[Turn]:
     grouped: dict[str, dict[str, float]] = {}
     display: dict[str, object] = {}  # key -> first-seen original turn_id
     order: list[str] = []
+    # key -> list of raw (kind, t, name, call_id) function-call records, in
+    # file order. Kept separate from ``grouped`` so tool calls never masquerade
+    # as boundary events or trip the duplicate-event guard.
+    raw_calls: dict[str, list[tuple[str, float, str, Optional[str]]]] = {}
 
     for lineno, rec in _iter_records(path):
         if not isinstance(rec, dict):
@@ -105,6 +144,16 @@ def load_turns(path: str, warn: Callable[[str], None] = _warn) -> list[Turn]:
             continue
         key = str(turn_id)
         event = str(event)
+        if event in _FUNC_EVENTS:
+            name = rec.get("name")
+            name = str(name) if isinstance(name, (str, int, float)) else ""
+            if not name:
+                name = "?"
+            call_id = rec.get("call_id")
+            call_id = str(call_id) if isinstance(call_id, (str, int, float)) else None
+            kind = "start" if event == FUNC_START_EVENT else "result"
+            raw_calls.setdefault(key, []).append((kind, t, name, call_id))
+            continue
         if key not in grouped:
             grouped[key] = {}
             display[key] = turn_id
@@ -134,9 +183,88 @@ def load_turns(path: str, warn: Callable[[str], None] = _warn) -> list[Turn]:
         total = (events[_TOTAL_END] - events[_TOTAL_START]) * 1000.0
         if any(v < 0 for v in stages.values()):
             warn(f"{path}: turn {turn_id} has out-of-order timestamps")
-        turns.append(Turn(turn_id=turn_id, stages=stages, total=total, source=path))
+        calls = _pair_calls(raw_calls.get(key, []), path, turn_id, warn)
+        turns.append(
+            Turn(
+                turn_id=turn_id,
+                stages=stages,
+                total=total,
+                source=path,
+                calls=calls,
+                t0=events[_TOTAL_START],
+            )
+        )
 
     return turns
+
+
+def _pair_calls(
+    records: list[tuple[str, float, str, Optional[str]]],
+    path: str,
+    turn_id: object,
+    warn: Callable[[str], None],
+) -> list[FunctionCall]:
+    """Pair function_call_start/result records into :class:`FunctionCall`\\ s.
+
+    Pairing prefers ``call_id`` (pipecat ``tool_call_id``); records without an
+    id fall back to FIFO pairing in timestamp order. A start with no matching
+    result becomes an unfinished call (``result_t=None``); a result with no
+    matching start is a malformed orphan and is dropped with a warning.
+    """
+    if not records:
+        return []
+
+    starts = [(t, name, cid) for kind, t, name, cid in records if kind == "start"]
+    results = [(t, name, cid) for kind, t, name, cid in records if kind == "result"]
+
+    # Bucket results that carry an id for exact matching; the rest go FIFO.
+    results_by_id: dict[str, list[tuple[float, str]]] = {}
+    results_no_id: list[tuple[float, str]] = []
+    for t, name, cid in results:
+        if cid is not None:
+            results_by_id.setdefault(cid, []).append((t, name))
+        else:
+            results_no_id.append((t, name))
+    for bucket in results_by_id.values():
+        bucket.sort(key=lambda x: x[0])
+    results_no_id.sort(key=lambda x: x[0])
+
+    calls: list[FunctionCall] = []
+    starts_no_id: list[tuple[float, str]] = []
+    for t, name, cid in starts:
+        if cid is not None:
+            bucket = results_by_id.get(cid)
+            if bucket:
+                rt, rname = bucket.pop(0)
+                calls.append(
+                    FunctionCall(name=name or rname, start_t=t, result_t=rt, call_id=cid)
+                )
+            else:
+                calls.append(FunctionCall(name=name, start_t=t, result_t=None, call_id=cid))
+        else:
+            starts_no_id.append((t, name))
+
+    starts_no_id.sort(key=lambda x: x[0])
+    ri = 0
+    for t, name in starts_no_id:
+        if ri < len(results_no_id):
+            rt, _ = results_no_id[ri]
+            ri += 1
+            calls.append(FunctionCall(name=name, start_t=t, result_t=rt, call_id=None))
+        else:
+            calls.append(FunctionCall(name=name, start_t=t, result_t=None, call_id=None))
+
+    orphans = sum(len(b) for b in results_by_id.values()) + max(
+        0, len(results_no_id) - ri
+    )
+    if orphans:
+        warn(
+            f"{path}: turn {turn_id} has {orphans} function_call_result(s) "
+            f"without a matching start"
+        )
+
+    calls.sort(key=lambda c: c.start_t)
+    return calls
 
 
 def load_turns_multi(

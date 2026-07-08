@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from .model import STAGE_LABELS, Turn
-from .stats import StageStats, aggregate
+from .model import STAGE_LABELS, FunctionCall, Turn
+from .stats import StageStats, aggregate, aggregate_tools
 
 # Chart geometry.
 TRACK_WIDTH = 44          # columns for the waterfall track
@@ -21,6 +21,7 @@ _STAGE_COLOR = {
     "TTS": 78,        # green
     "Playback": 105,  # violet
 }
+_TOOL_COLOR = 173     # coral, distinct from the four stage hues
 _DIM = 240
 _RESET = "\033[0m"
 
@@ -53,6 +54,22 @@ def _scale(global_max: float) -> float:
     return TRACK_WIDTH / global_max if global_max > 0 else 0.0
 
 
+def _draw_track(
+    offset_ms: float, duration: float, scale: float, color: int, pal: Palette
+) -> str:
+    """Render one TRACK_WIDTH-wide bar at a given offset (shared by all rows)."""
+    # Clamp against out-of-order timestamps: a negative cumulative offset or an
+    # over-wide bar must never push the track past TRACK_WIDTH.
+    start = min(max(round(offset_ms * scale), 0), TRACK_WIDTH)
+    width = max(1, round(duration * scale)) if duration > 0 else 0
+    width = max(0, min(width, TRACK_WIDTH - start))
+
+    track_before = pal.dim(_TRACK * start)
+    bar = pal.fg(_FILLED * width, color)
+    track_after = pal.dim(_TRACK * max(0, TRACK_WIDTH - start - width))
+    return track_before + bar + track_after
+
+
 def _stage_row(
     label: str,
     duration: float,
@@ -61,23 +78,43 @@ def _stage_row(
     is_bottleneck: bool,
     pal: Palette,
 ) -> str:
-    # Clamp against out-of-order timestamps: a negative cumulative offset or an
-    # over-wide bar must never push the track past TRACK_WIDTH.
-    start = min(max(round(offset_ms * scale), 0), TRACK_WIDTH)
-    width = max(1, round(duration * scale)) if duration > 0 else 0
-    width = max(0, min(width, TRACK_WIDTH - start))
-
-    track_before = pal.dim(_TRACK * start)
-    bar = pal.fg(_FILLED * width, _STAGE_COLOR.get(label, _DIM))
-    track_after = pal.dim(_TRACK * max(0, TRACK_WIDTH - start - width))
-    track = track_before + bar + track_after
-
+    track = _draw_track(offset_ms, duration, scale, _STAGE_COLOR.get(label, _DIM), pal)
     label_cell = f"  {label.ljust(LABEL_WIDTH)}"
     ms_cell = _fmt_ms(duration).rjust(8)
     row = f"{label_cell} {track}  {ms_cell}"
     if is_bottleneck:
         row += "  " + pal.bold(pal.fg("← bottleneck", 203))
     return row
+
+
+def _tool_label(name: str) -> str:
+    """A ``⚙ name`` label padded/truncated to LABEL_WIDTH for alignment."""
+    raw = f"⚙ {name}"
+    if len(raw) > LABEL_WIDTH:
+        raw = raw[: LABEL_WIDTH - 1] + "…"
+    return raw.ljust(LABEL_WIDTH)
+
+
+def _tool_row(call: FunctionCall, turn_t0: float, scale: float, pal: Palette) -> str:
+    """Render one function call as its own waterfall row (⚙ label + bar + ms)."""
+    label_cell = f"  {_tool_label(call.name)}"
+    offset_ms = (call.start_t - turn_t0) * 1000.0
+    dur = call.duration
+
+    if dur is None:
+        # Unfinished: a single marker at the start offset, flagged on the right.
+        start = min(max(round(offset_ms * scale), 0), max(0, TRACK_WIDTH - 1))
+        track = (
+            pal.dim(_TRACK * start)
+            + pal.fg(_FILLED, _TOOL_COLOR)
+            + pal.dim(_TRACK * max(0, TRACK_WIDTH - start - 1))
+        )
+        ms_cell = "—".rjust(8)
+        return f"{label_cell} {track}  {ms_cell}  " + pal.fg("⚠ (no result)", 214)
+
+    track = _draw_track(offset_ms, dur, scale, _TOOL_COLOR, pal)
+    ms_cell = _fmt_ms(dur).rjust(8)
+    return f"{label_cell} {track}  {ms_cell}"
 
 
 def render_turn(
@@ -109,6 +146,10 @@ def render_turn(
             _stage_row(label, dur, offset, scale, label == bottleneck, pal)
         )
         offset += dur
+
+    # Function/tool calls, one row each, positioned by their real timestamps.
+    for call in sorted(turn.calls, key=lambda c: c.start_t):
+        lines.append(_tool_row(call, turn.t0, scale, pal))
 
     # Ruler with a target marker.
     lines.append(_ruler(target_ms, global_max, pal))
@@ -144,6 +185,24 @@ def render_summary(rows: Sequence[StageStats], n_turns: int, pal: Palette) -> st
     return "\n".join(lines)
 
 
+def render_tool_summary(rows: Sequence[StageStats], pal: Palette) -> str:
+    """Function-call p50/p95 block, appended only when tool calls exist."""
+    width = max(LABEL_WIDTH, max(len(r.label) for r in rows))
+    n_turns = rows[0].count
+    n_calls = sum(r.count for r in rows[1:])
+    title = pal.bold(
+        f"Tools  ({n_calls} call{'s' if n_calls != 1 else ''} "
+        f"in {n_turns} turn{'s' if n_turns != 1 else ''})"
+    )
+    head = f"  {'':<{width}} {'p50':>9} {'p95':>9}"
+    lines = [title, pal.dim(head)]
+    for i, row in enumerate(rows):
+        raw = row.label.ljust(width)
+        cell = pal.bold(raw) if i == 0 else raw
+        lines.append(f"  {cell} {_fmt_ms(row.p50):>9} {_fmt_ms(row.p95):>9}")
+    return "\n".join(lines)
+
+
 def render_replay(
     turns: Sequence[Turn], target_ms: float, source: str, pal: Palette
 ) -> str:
@@ -158,11 +217,17 @@ def render_replay(
 
     rows = aggregate(turns)
     blocks.append(render_summary(rows, len(turns), pal))
+
+    tool_rows = aggregate_tools(turns)
+    if tool_rows:
+        blocks.append("")
+        blocks.append(render_tool_summary(tool_rows, pal))
     return "\n".join(blocks)
 
 
 def render_stats(
-    rows: Sequence[StageStats], sources: Sequence[str], n_turns: int, pal: Palette
+    rows: Sequence[StageStats], sources: Sequence[str], n_turns: int, pal: Palette,
+    tool_rows: Sequence[StageStats] = (),
 ) -> str:
     """Full p50/p95/min/max table for the ``stats`` subcommand."""
     title = pal.bold("voxprofile") + pal.dim("  ·  stats")
@@ -182,4 +247,19 @@ def render_stats(
             _fmt_ms(v).rjust(10) for v in (row.p50, row.p95, row.min, row.max)
         )
         lines.append(f"  {cell}{values}")
+
+    if tool_rows:
+        width = max(LABEL_WIDTH, max(len(r.label) for r in tool_rows))
+        n_calls = sum(r.count for r in tool_rows[1:])
+        lines.append("")
+        lines.append(pal.bold(f"tools  ({n_calls} call(s))"))
+        tool_head = f"  {'function':<{width}}" + "".join(c.rjust(10) for c in cols)
+        lines.append(pal.dim(tool_head))
+        for i, row in enumerate(tool_rows):
+            raw = row.label.ljust(width)
+            cell = pal.bold(raw) if i == 0 else raw
+            values = "".join(
+                _fmt_ms(v).rjust(10) for v in (row.p50, row.p95, row.min, row.max)
+            )
+            lines.append(f"  {cell}{values}")
     return "\n".join(lines)

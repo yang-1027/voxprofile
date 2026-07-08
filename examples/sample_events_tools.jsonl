@@ -1,0 +1,32 @@
+{"turn_id": 1, "event": "user_stopped_speaking", "t": 1751700000.0}
+{"turn_id": 1, "event": "stt_final", "t": 1751700000.15}
+{"turn_id": 1, "event": "llm_first_token", "t": 1751700000.45}
+{"turn_id": 1, "event": "tts_first_byte", "t": 1751700000.55}
+{"turn_id": 1, "event": "playback_started", "t": 1751700000.6}
+{"turn_id": 2, "event": "user_stopped_speaking", "t": 1751700006.0}
+{"turn_id": 2, "event": "stt_final", "t": 1751700006.16}
+{"turn_id": 2, "event": "function_call_start", "t": 1751700006.2, "name": "get_weather", "call_id": "c1"}
+{"turn_id": 2, "event": "function_call_result", "t": 1751700006.82, "name": "get_weather", "call_id": "c1"}
+{"turn_id": 2, "event": "llm_first_token", "t": 1751700006.9}
+{"turn_id": 2, "event": "tts_first_byte", "t": 1751700007.01}
+{"turn_id": 2, "event": "playback_started", "t": 1751700007.07}
+{"turn_id": 3, "event": "user_stopped_speaking", "t": 1751700013.0}
+{"turn_id": 3, "event": "stt_final", "t": 1751700013.14}
+{"turn_id": 3, "event": "function_call_start", "t": 1751700013.18, "name": "search_docs", "call_id": "c2"}
+{"turn_id": 3, "event": "function_call_result", "t": 1751700013.56, "name": "search_docs", "call_id": "c2"}
+{"turn_id": 3, "event": "function_call_start", "t": 1751700013.58, "name": "rank_results", "call_id": "c3"}
+{"turn_id": 3, "event": "function_call_result", "t": 1751700013.8, "name": "rank_results", "call_id": "c3"}
+{"turn_id": 3, "event": "llm_first_token", "t": 1751700013.88}
+{"turn_id": 3, "event": "tts_first_byte", "t": 1751700013.98}
+{"turn_id": 3, "event": "playback_started", "t": 1751700014.04}
+{"turn_id": 4, "event": "user_stopped_speaking", "t": 1751700020.0}
+{"turn_id": 4, "event": "stt_final", "t": 1751700020.13}
+{"turn_id": 4, "event": "llm_first_token", "t": 1751700020.42}
+{"turn_id": 4, "event": "tts_first_byte", "t": 1751700020.505}
+{"turn_id": 4, "event": "playback_started", "t": 1751700020.55}
+{"turn_id": 5, "event": "user_stopped_speaking", "t": 1751700026.0}
+{"turn_id": 5, "event": "stt_final", "t": 1751700026.15}
+{"turn_id": 5, "event": "function_call_start", "t": 1751700026.2, "name": "slow_db_query", "call_id": "c4"}
+{"turn_id": 5, "event": "llm_first_token", "t": 1751700026.9}
+{"turn_id": 5, "event": "tts_first_byte", "t": 1751700027.01}
+{"turn_id": 5, "event": "playback_started", "t": 1751700027.07}

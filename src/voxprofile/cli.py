@@ -10,7 +10,7 @@ from typing import Optional, Sequence
 from . import __version__
 from .model import load_turns
 from .render import Palette, render_replay, render_stats
-from .stats import aggregate
+from .stats import aggregate, aggregate_tools
 
 
 def _color_enabled(no_color: bool, stream) -> bool:
@@ -78,7 +78,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         return 2 if had_error else 1
 
     rows = aggregate(turns)
-    print(render_stats(rows, sources, len(turns), pal))
+    tool_rows = aggregate_tools(turns)
+    print(render_stats(rows, sources, len(turns), pal, tool_rows))
     return 2 if had_error else 0
 
 

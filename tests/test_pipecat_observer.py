@@ -20,6 +20,14 @@ def _frame(name):
     return type(name, (), {})()
 
 
+def _func_frame(name, function_name, tool_call_id):
+    """A synthetic FunctionCall frame carrying function_name/tool_call_id."""
+    return type(name, (), {
+        "function_name": function_name,
+        "tool_call_id": tool_call_id,
+    })()
+
+
 class _Direction:
     def __init__(self, name):
         self.name = name
@@ -160,6 +168,69 @@ def test_on_push_frame_async_and_direction_filter(tmp_path):
     assert turns[0].turn_id == 1
 
 
+def test_function_call_frames_recorded_and_paired(tmp_path):
+    path = tmp_path / "rec.jsonl"
+    obs = VoxprofileObserver(str(path))
+    obs.handle_frame(_frame("VADUserStoppedSpeakingFrame"), t=1000.0)
+    obs.handle_frame(_frame("TranscriptionFrame"), t=1000.15)
+    obs.handle_frame(
+        _func_frame("FunctionCallInProgressFrame", "get_weather", "c1"), t=1000.2
+    )
+    obs.handle_frame(
+        _func_frame("FunctionCallResultFrame", "get_weather", "c1"), t=1000.82
+    )
+    obs.handle_frame(_frame("LLMTextFrame"), t=1000.9)
+    obs.handle_frame(_frame("TTSAudioRawFrame"), t=1001.0)
+    obs.handle_frame(_frame("BotStartedSpeakingFrame"), t=1001.05)
+    obs.close()
+
+    lines = [json.loads(l) for l in path.read_text().splitlines()]
+    fc = [r for r in lines if r["event"].startswith("function_call")]
+    assert [r["event"] for r in fc] == [
+        "function_call_start",
+        "function_call_result",
+    ]
+    assert all(r["name"] == "get_weather" and r["call_id"] == "c1" for r in fc)
+
+    turns = load_turns(str(path))
+    assert len(turns) == 1
+    assert len(turns[0].calls) == 1
+    assert round(turns[0].calls[0].duration) == 620
+
+
+def test_function_call_outside_turn_is_ignored(tmp_path):
+    path = tmp_path / "rec.jsonl"
+    obs = VoxprofileObserver(str(path))
+    # a stray tool frame before any turn opens must not be recorded
+    obs.handle_frame(_func_frame("FunctionCallInProgressFrame", "f", "c1"), t=999.0)
+    obs.handle_frame(_frame("VADUserStoppedSpeakingFrame"), t=1000.0)
+    obs.close()
+    events = [json.loads(l)["event"] for l in path.read_text().splitlines()]
+    assert events == ["user_stopped_speaking"]
+
+
+def test_function_call_does_not_count_as_barge_in_progress(tmp_path):
+    """A tool call must not itself close/reset a turn or leak across turns."""
+    path = tmp_path / "rec.jsonl"
+    obs = VoxprofileObserver(str(path))
+    obs.handle_frame(_frame("VADUserStoppedSpeakingFrame"), t=1000.0)
+    obs.handle_frame(_frame("TranscriptionFrame"), t=1000.15)
+    obs.handle_frame(
+        _func_frame("FunctionCallInProgressFrame", "f", "c1"), t=1000.2
+    )
+    obs.handle_frame(
+        _func_frame("FunctionCallResultFrame", "f", "c1"), t=1000.4
+    )
+    obs.handle_frame(_frame("LLMTextFrame"), t=1000.9)
+    obs.handle_frame(_frame("TTSAudioRawFrame"), t=1001.0)
+    obs.handle_frame(_frame("BotStartedSpeakingFrame"), t=1001.05)
+    obs.close()
+    turns = load_turns(str(path))
+    assert len(turns) == 1
+    assert turns[0].turn_id == 1
+    assert len(turns[0].calls) == 1
+
+
 def test_context_manager_closes(tmp_path):
     path = tmp_path / "rec.jsonl"
     with VoxprofileObserver(str(path)) as obs:
@@ -172,6 +243,8 @@ def test_real_pipecat_frames_end_to_end(tmp_path):
     """Drive the observer with genuine Pipecat 1.5.x frame objects."""
     from pipecat.frames.frames import (
         BotStartedSpeakingFrame,
+        FunctionCallInProgressFrame,
+        FunctionCallResultFrame,
         LLMTextFrame,
         TranscriptionFrame,
         TTSAudioRawFrame,
@@ -197,6 +270,13 @@ def test_real_pipecat_frames_end_to_end(tmp_path):
     frames = [
         VADUserStoppedSpeakingFrame(stop_secs=0.8, timestamp=0.0),
         TranscriptionFrame(text="hi", user_id="u1", timestamp="2026-07-05T00:00:00Z"),
+        FunctionCallInProgressFrame(
+            function_name="get_weather", tool_call_id="c1", arguments={"city": "SF"}
+        ),
+        FunctionCallResultFrame(
+            function_name="get_weather", tool_call_id="c1",
+            arguments={"city": "SF"}, result={"temp": 20}, run_llm=True,
+        ),
         LLMTextFrame(text="Hi"),
         LLMTextFrame(text=" there"),  # later token ignored
         TTSAudioRawFrame(audio=b"\x00\x00", sample_rate=16000, num_channels=1),
@@ -216,10 +296,17 @@ def test_real_pipecat_frames_end_to_end(tmp_path):
     assert events == [
         "user_stopped_speaking",
         "stt_final",
+        "function_call_start",
+        "function_call_result",
         "llm_first_token",
         "tts_first_byte",
         "playback_started",
     ]
+    fc = [r for r in records if r["event"].startswith("function_call")]
+    assert all(r["name"] == "get_weather" and r["call_id"] == "c1" for r in fc)
+
     turns = load_turns(str(path))
     assert len(turns) == 1
     assert turns[0].turn_id == 1
+    assert len(turns[0].calls) == 1
+    assert turns[0].calls[0].name == "get_weather"
